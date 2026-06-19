@@ -1,101 +1,138 @@
-# Therepy Web App
+# Therepy
 
-This project now runs as a browser-based multi-user therapy chat app backed by Ollama.
+Therepy now uses:
 
-## What it does
+- A Flask backend API for auth, chat storage, and Ollama access
+- A Next.js frontend for a cleaner mobile-first browser experience
+- Async message handling so sending feels instant even when the Raspberry Pi is still generating the reply
 
-- Signup and login from the browser
-- Separate saved chat sessions for each user
-- Chat history that stays available after login
-- Persistent conversation context for each session
-- Ollama-powered therapist responses using a Raspberry Pi friendly model
+## What changed
+
+- Messages no longer wait for the full Ollama response before returning to the browser
+- The UI is now built for phone and laptop screens
+- Chat sessions remain saved per user after login
+- The frontend shows an animated thinking state while the model is generating
+- The backend keeps recent session context for each reply
+
+## Why it felt slow before
+
+The previous Flask page submitted one blocking request that only returned after Ollama finished generating. On a Raspberry Pi that can easily feel like the message itself is stuck.
+
+Now the flow is:
+
+1. Save the user message immediately
+2. Create a pending assistant message
+3. Generate the reply in a background thread
+4. Poll from the frontend and replace the pending bubble when the response is ready
+
+That makes the app feel much faster and fixes the "message taking forever to send" problem.
 
 ## Recommended model
 
-Default model: `llama3.2:3b`
+Default model: `qwen2.5:1.5b`
 
-Why this default:
+Why this is the new default:
 
-- Stronger than tiny models like TinyLlama
-- Small enough to be realistic on a Raspberry Pi compared with 7B+ models
-- Good balance of quality, memory use, and speed for local hosting
+- Better Raspberry Pi speed than 3B models
+- Better quality than the very tiny fallback models
+- Good balance for mobile browser use where responsiveness matters
 
-You can change the model with:
+If your Pi has more RAM and you want higher quality, try:
 
 ```bash
 export THERAPY_MODEL=qwen2.5:3b
 ```
 
-`qwen2.5:3b` is another good option if you want to compare quality and speed.
+## Project structure
 
-## Local setup
+- `app.py`: Flask backend API
+- `start_therapy.py`: backend launcher
+- `frontend/`: Next.js frontend
+- `therepy.db`: SQLite database for users, sessions, and messages
 
-1. Create a virtual environment.
-2. Install Python dependencies.
-3. Install and start Ollama.
-4. Pull the model.
-5. Start the app.
-
-Example:
+## Backend setup
 
 ```bash
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
-ollama pull llama3.2:3b
-python start_therapy.py
-```
-
-The app listens on `0.0.0.0:8000` by default, so other devices on the same network can reach it.
-
-## Raspberry Pi deployment
-
-Use Raspberry Pi OS 64-bit if possible. Larger RAM helps a lot for model performance.
-
-1. Install Python 3 and `pip`.
-2. Install Ollama on the Pi.
-3. Clone or copy this project to the Pi.
-4. Install requirements:
-
-```bash
-pip install -r requirements.txt
-```
-
-5. Pull the default model:
-
-```bash
-ollama pull llama3.2:3b
-```
-
-6. Set a strong secret key before deployment:
-
-```bash
 export THERAPY_SECRET_KEY='replace-this-with-a-long-random-secret'
-```
-
-7. Start the app:
-
-```bash
+export THERAPY_MODEL=qwen2.5:1.5b
+ollama pull qwen2.5:1.5b
 python start_therapy.py
 ```
 
-8. Open it from another device:
+Backend default URL:
 
 ```text
 http://YOUR_PI_IP:8000
 ```
 
-## Optional production notes
+## Frontend setup
 
-- Put Nginx in front of the app if you want a cleaner local-network deployment.
-- Run the app with `systemd` on the Pi so it starts automatically on boot.
-- Back up `therepy.db` because it contains users, sessions, and messages.
+Copy the example env file and point it at the backend:
+
+```bash
+cd frontend
+cp .env.local.example .env.local
+```
+
+Set:
+
+```text
+NEXT_PUBLIC_API_BASE_URL=http://YOUR_PI_IP:8000
+```
+
+Then install and run:
+
+```bash
+npm install
+npm run dev
+```
+
+Frontend default URL:
+
+```text
+http://YOUR_PI_IP:3000
+```
+
+## Raspberry Pi network setup
+
+If your frontend runs on port `3000`, the backend must allow that browser origin.
+
+Example:
+
+```bash
+export THERAPY_ALLOWED_ORIGINS=http://YOUR_PI_IP:3000
+```
+
+If you also want local desktop development, you can use multiple origins:
+
+```bash
+export THERAPY_ALLOWED_ORIGINS=http://YOUR_PI_IP:3000,http://localhost:3000,http://127.0.0.1:3000
+```
+
+## Production-style deployment on the Pi
+
+A clean setup is:
+
+1. Run the Flask backend on port `8000`
+2. Run the Next.js frontend on port `3000`
+3. Put Nginx in front if you want one clean domain or IP entry point
+4. Use `systemd` to auto-start both services on boot
 
 ## Data storage
 
-- Users, chat sessions, and messages are stored in `therepy.db`
-- Browser login state uses Flask sessions
-- Conversation context is rebuilt from saved messages in each chat session
+- Users, sessions, and messages are stored in `therepy.db`
+- Passwords are stored hashed
+- Login state uses secure Flask session cookies
+- Message status can be `pending`, `complete`, or `error`
+
+## Notes on responsiveness
+
+- The backend now only sends the most recent session messages to the model to reduce prompt size
+- `qwen2.5:1.5b` is chosen to reduce Raspberry Pi response time
+- The frontend disables duplicate sends while one reply is still pending
 
 ## Important safety note
 

@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """
-Launcher for the browser-based Therepy web app.
+Launcher for the Therepy backend API.
 """
 
 import os
 import subprocess
 
 
-DEFAULT_MODEL = os.getenv("THERAPY_MODEL", "llama3.2:3b")
+DEFAULT_MODEL = os.getenv("THERAPY_MODEL", "qwen2.5:1.5b")
 
 
 def check_ollama():
@@ -38,7 +38,7 @@ def main():
     host = os.getenv("THERAPY_HOST", "0.0.0.0")
     port = int(os.getenv("THERAPY_PORT", "8000"))
 
-    print("Therepy Web Launcher")
+    print("Therepy Backend Launcher")
     print("=" * 40)
 
     available, _ = check_ollama()
@@ -51,10 +51,11 @@ def main():
         print(f"Could not verify or install the model '{DEFAULT_MODEL}'.")
         return
 
-    print("Starting browser app...")
+    print("Starting backend API...")
     print(f"Configured host: {host}")
     print(f"Configured port: {port}")
     print(f"Configured model: {DEFAULT_MODEL}")
+    print("Frontend should point to this backend URL from the browser.")
 
     from app import app
 

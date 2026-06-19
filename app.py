@@ -1,18 +1,27 @@
 import os
 import sqlite3
 import subprocess
+import threading
 from datetime import datetime
 from functools import wraps
 
-from flask import Flask, flash, g, redirect, render_template, request, session, url_for
+from flask import Flask, g, jsonify, request, session
 from werkzeug.security import check_password_hash, generate_password_hash
 
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DATABASE_PATH = os.path.join(BASE_DIR, "therepy.db")
-DEFAULT_MODEL = os.getenv("THERAPY_MODEL", "llama3.2:3b")
+DEFAULT_MODEL = os.getenv("THERAPY_MODEL", "qwen2.5:1.5b")
 SECRET_KEY = os.getenv("THERAPY_SECRET_KEY", "change-this-before-deploying")
-CONTEXT_MESSAGE_LIMIT = 12
+ALLOWED_ORIGINS = {
+    origin.strip()
+    for origin in os.getenv(
+        "THERAPY_ALLOWED_ORIGINS",
+        "http://localhost:3000,http://127.0.0.1:3000",
+    ).split(",")
+    if origin.strip()
+}
+CONTEXT_MESSAGE_LIMIT = 8
 
 SYSTEM_PROMPT = """You are Dr. Sarah, a warm, empathetic, and highly skilled therapist with 15 years of experience.
 
@@ -28,7 +37,7 @@ Core principles:
 Communication style:
 - Speak naturally and conversationally, not clinically.
 - Be warm, emotionally attuned, and non-judgmental.
-- Give complete but concise responses.
+- Keep responses supportive, grounded, and concise.
 - Help the client explore their own insights and next steps.
 """
 
@@ -56,7 +65,9 @@ CREATE TABLE IF NOT EXISTS messages (
     role TEXT NOT NULL,
     content TEXT NOT NULL,
     emotional_state TEXT,
+    status TEXT NOT NULL DEFAULT 'complete',
     created_at TEXT NOT NULL,
+    updated_at TEXT,
     FOREIGN KEY (chat_session_id) REFERENCES chat_sessions(id)
 );
 """
@@ -65,6 +76,9 @@ app = Flask(__name__)
 app.config["SECRET_KEY"] = SECRET_KEY
 app.config["DATABASE_PATH"] = DATABASE_PATH
 app.config["MODEL_NAME"] = DEFAULT_MODEL
+app.config["SESSION_COOKIE_HTTPONLY"] = True
+app.config["SESSION_COOKIE_SAMESITE"] = "Lax"
+app.config["SESSION_COOKIE_SECURE"] = os.getenv("THERAPY_SECURE_COOKIE", "false").lower() == "true"
 
 
 class OllamaTherapist:
@@ -103,7 +117,7 @@ class OllamaTherapist:
         context_block = "\n".join(context_lines)
         return (
             f"{SYSTEM_PROMPT}\n"
-            "Keep the conversation private, supportive, and grounded in the context below.\n"
+            "Keep the conversation supportive, practical, and grounded in the saved session context.\n"
             f"{emotional_hint}\n"
             "Conversation so far:\n"
             f"{context_block}\n\n"
@@ -119,7 +133,7 @@ class OllamaTherapist:
                 input=prompt,
                 capture_output=True,
                 text=True,
-                timeout=180,
+                timeout=120,
                 encoding="utf-8",
                 errors="replace",
             )
@@ -129,13 +143,13 @@ class OllamaTherapist:
                 f"pull the configured model '{self.model_name}'."
             )
         except subprocess.TimeoutExpired:
-            return "I'm taking a little longer to think than usual. Please try sending that again."
+            return "I'm taking longer than usual to think. Please try again in a moment."
         except Exception:
             return "I'm having some technical difficulty right now, but I'm still here with you."
 
         if result.returncode != 0:
-            error_text = (result.stderr or "").strip()
-            if "pull" in error_text.lower() or "not found" in error_text.lower():
+            error_text = (result.stderr or "").strip().lower()
+            if "pull" in error_text or "not found" in error_text:
                 return (
                     f"The configured model '{self.model_name}' is not installed yet. "
                     f"Run `ollama pull {self.model_name}` on the Raspberry Pi."
@@ -148,20 +162,58 @@ class OllamaTherapist:
         return response or "I'm here with you. Can you tell me a little more about that?"
 
 
+def utc_now() -> str:
+    return datetime.utcnow().isoformat()
+
+
+def get_connection() -> sqlite3.Connection:
+    connection = sqlite3.connect(app.config["DATABASE_PATH"], check_same_thread=False)
+    connection.row_factory = sqlite3.Row
+    return connection
+
+
 def get_db() -> sqlite3.Connection:
     if "db" not in g:
-        g.db = sqlite3.connect(app.config["DATABASE_PATH"])
-        g.db.row_factory = sqlite3.Row
+        g.db = get_connection()
     return g.db
 
 
+def ensure_column(db: sqlite3.Connection, table_name: str, column_name: str, definition: str) -> None:
+    columns = {row["name"] for row in db.execute(f"PRAGMA table_info({table_name})").fetchall()}
+    if column_name not in columns:
+        db.execute(f"ALTER TABLE {table_name} ADD COLUMN {column_name} {definition}")
+
+
 def init_db() -> None:
-    db = sqlite3.connect(app.config["DATABASE_PATH"])
+    db = get_connection()
     try:
         db.executescript(SCHEMA)
+        ensure_column(db, "messages", "status", "TEXT NOT NULL DEFAULT 'complete'")
+        ensure_column(db, "messages", "updated_at", "TEXT")
+        db.execute("UPDATE messages SET status = 'complete' WHERE status IS NULL OR status = ''")
+        db.execute("UPDATE messages SET updated_at = created_at WHERE updated_at IS NULL")
         db.commit()
     finally:
         db.close()
+
+
+@app.before_request
+def handle_preflight():
+    if request.method == "OPTIONS":
+        return ("", 204)
+    return None
+
+
+@app.after_request
+def add_cors_headers(response):
+    origin = request.headers.get("Origin")
+    if origin and origin in ALLOWED_ORIGINS:
+        response.headers["Access-Control-Allow-Origin"] = origin
+        response.headers["Access-Control-Allow-Credentials"] = "true"
+        response.headers["Access-Control-Allow-Headers"] = "Content-Type"
+        response.headers["Access-Control-Allow-Methods"] = "GET,POST,OPTIONS"
+        response.headers["Vary"] = "Origin"
+    return response
 
 
 @app.teardown_appcontext
@@ -171,14 +223,10 @@ def close_db(exception):
         db.close()
 
 
-def login_required(view):
-    @wraps(view)
-    def wrapped_view(**kwargs):
-        if not current_user():
-            return redirect(url_for("login"))
-        return view(**kwargs)
-
-    return wrapped_view
+def json_error(message: str, status_code: int):
+    response = jsonify({"error": message})
+    response.status_code = status_code
+    return response
 
 
 def current_user():
@@ -187,47 +235,86 @@ def current_user():
         return None
 
     db = get_db()
-    return db.execute("SELECT * FROM users WHERE id = ?", (user_id,)).fetchone()
+    return db.execute("SELECT id, username, created_at FROM users WHERE id = ?", (user_id,)).fetchone()
 
 
-def create_chat_session(user_id: int, title: str = "New chat") -> int:
-    db = get_db()
-    now = datetime.utcnow().isoformat()
-    cursor = db.execute(
-        """
-        INSERT INTO chat_sessions (user_id, title, model_name, created_at, updated_at)
-        VALUES (?, ?, ?, ?, ?)
-        """,
-        (user_id, title, app.config["MODEL_NAME"], now, now),
-    )
-    db.commit()
-    return cursor.lastrowid
+def api_login_required(view):
+    @wraps(view)
+    def wrapped_view(*args, **kwargs):
+        user = current_user()
+        if not user:
+            return json_error("Authentication required.", 401)
+        return view(*args, **kwargs)
+
+    return wrapped_view
 
 
-def get_user_sessions(user_id: int) -> list[sqlite3.Row]:
-    db = get_db()
+def serialize_user(user: sqlite3.Row) -> dict:
+    return {
+        "id": user["id"],
+        "username": user["username"],
+        "createdAt": user["created_at"],
+    }
+
+
+def serialize_message(message: sqlite3.Row) -> dict:
+    return {
+        "id": message["id"],
+        "role": message["role"],
+        "content": message["content"],
+        "status": message["status"],
+        "emotionalState": message["emotional_state"],
+        "createdAt": message["created_at"],
+        "updatedAt": message["updated_at"],
+    }
+
+
+def serialize_chat_session(chat_session: sqlite3.Row) -> dict:
+    return {
+        "id": chat_session["id"],
+        "title": chat_session["title"],
+        "modelName": chat_session["model_name"],
+        "createdAt": chat_session["created_at"],
+        "updatedAt": chat_session["updated_at"],
+        "lastMessage": chat_session["last_message"],
+    }
+
+
+def get_session_for_user(db: sqlite3.Connection, session_id: int, user_id: int):
     return db.execute(
         """
         SELECT *
         FROM chat_sessions
-        WHERE user_id = ?
-        ORDER BY updated_at DESC, id DESC
+        WHERE id = ? AND user_id = ?
+        """,
+        (session_id, user_id),
+    ).fetchone()
+
+
+def get_user_sessions(db: sqlite3.Connection, user_id: int) -> list[sqlite3.Row]:
+    return db.execute(
+        """
+        SELECT
+            s.*,
+            COALESCE(
+                (
+                    SELECT content
+                    FROM messages m
+                    WHERE m.chat_session_id = s.id
+                    ORDER BY m.id DESC
+                    LIMIT 1
+                ),
+                ''
+            ) AS last_message
+        FROM chat_sessions s
+        WHERE s.user_id = ?
+        ORDER BY s.updated_at DESC, s.id DESC
         """,
         (user_id,),
     ).fetchall()
 
 
-def get_session_or_404(session_id: int, user_id: int):
-    db = get_db()
-    chat_session = db.execute(
-        "SELECT * FROM chat_sessions WHERE id = ? AND user_id = ?",
-        (session_id, user_id),
-    ).fetchone()
-    return chat_session
-
-
-def get_session_messages(session_id: int) -> list[sqlite3.Row]:
-    db = get_db()
+def get_session_messages(db: sqlite3.Connection, session_id: int) -> list[sqlite3.Row]:
     return db.execute(
         """
         SELECT *
@@ -239,25 +326,24 @@ def get_session_messages(session_id: int) -> list[sqlite3.Row]:
     ).fetchall()
 
 
-def add_message(chat_session_id: int, role: str, content: str, emotional_state: str | None = None) -> None:
-    db = get_db()
-    now = datetime.utcnow().isoformat()
-    db.execute(
+def create_chat_session(db: sqlite3.Connection, user_id: int, title: str = "New chat") -> sqlite3.Row:
+    now = utc_now()
+    cursor = db.execute(
         """
-        INSERT INTO messages (chat_session_id, role, content, emotional_state, created_at)
+        INSERT INTO chat_sessions (user_id, title, model_name, created_at, updated_at)
         VALUES (?, ?, ?, ?, ?)
         """,
-        (chat_session_id, role, content, emotional_state, now),
-    )
-    db.execute(
-        "UPDATE chat_sessions SET updated_at = ? WHERE id = ?",
-        (now, chat_session_id),
+        (user_id, title, app.config["MODEL_NAME"], now, now),
     )
     db.commit()
+    session_id = cursor.lastrowid
+    return db.execute(
+        "SELECT *, '' AS last_message FROM chat_sessions WHERE id = ?",
+        (session_id,),
+    ).fetchone()
 
 
-def maybe_update_chat_title(chat_session_id: int, content: str) -> None:
-    db = get_db()
+def maybe_update_chat_title(db: sqlite3.Connection, chat_session_id: int, content: str) -> None:
     chat_session = db.execute(
         "SELECT title FROM chat_sessions WHERE id = ?",
         (chat_session_id,),
@@ -268,154 +354,274 @@ def maybe_update_chat_title(chat_session_id: int, content: str) -> None:
     title = " ".join(content.split())
     title = title[:60].strip() or "New chat"
     db.execute(
-        "UPDATE chat_sessions SET title = ? WHERE id = ?",
-        (title, chat_session_id),
+        "UPDATE chat_sessions SET title = ?, updated_at = ? WHERE id = ?",
+        (title, utc_now(), chat_session_id),
+    )
+
+
+def create_message(
+    db: sqlite3.Connection,
+    chat_session_id: int,
+    role: str,
+    content: str,
+    emotional_state: str | None = None,
+    status: str = "complete",
+) -> sqlite3.Row:
+    now = utc_now()
+    cursor = db.execute(
+        """
+        INSERT INTO messages (chat_session_id, role, content, emotional_state, status, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+        """,
+        (chat_session_id, role, content, emotional_state, status, now, now),
+    )
+    db.execute(
+        "UPDATE chat_sessions SET updated_at = ? WHERE id = ?",
+        (now, chat_session_id),
     )
     db.commit()
+    return db.execute("SELECT * FROM messages WHERE id = ?", (cursor.lastrowid,)).fetchone()
 
 
-@app.context_processor
-def inject_template_context():
-    return {
-        "auth_user": current_user(),
-        "model_name": app.config["MODEL_NAME"],
-    }
+def update_message_status(message_id: int, status: str, content: str) -> None:
+    db = get_connection()
+    try:
+        now = utc_now()
+        db.execute(
+            "UPDATE messages SET status = ?, content = ?, updated_at = ? WHERE id = ?",
+            (status, content, now, message_id),
+        )
+        message = db.execute("SELECT chat_session_id FROM messages WHERE id = ?", (message_id,)).fetchone()
+        if message:
+            db.execute(
+                "UPDATE chat_sessions SET updated_at = ? WHERE id = ?",
+                (now, message["chat_session_id"]),
+            )
+        db.commit()
+    finally:
+        db.close()
 
 
-@app.route("/")
-def index():
+def generate_assistant_reply(chat_session_id: int, assistant_message_id: int, emotional_state: str) -> None:
+    db = get_connection()
+    try:
+        chat_session = db.execute(
+            "SELECT * FROM chat_sessions WHERE id = ?",
+            (chat_session_id,),
+        ).fetchone()
+        if not chat_session:
+            update_message_status(assistant_message_id, "error", "This chat session could not be found anymore.")
+            return
+
+        messages = db.execute(
+            """
+            SELECT *
+            FROM messages
+            WHERE chat_session_id = ? AND status = 'complete'
+            ORDER BY id ASC
+            """,
+            (chat_session_id,),
+        ).fetchall()
+        therapist = OllamaTherapist(chat_session["model_name"])
+        response = therapist.generate_response(messages, emotional_state)
+        update_message_status(assistant_message_id, "complete", response)
+    except Exception:
+        update_message_status(
+            assistant_message_id,
+            "error",
+            "I'm having some technical difficulty right now, but I'm still here with you.",
+        )
+    finally:
+        db.close()
+
+
+def has_pending_assistant_message(db: sqlite3.Connection, chat_session_id: int) -> bool:
+    pending = db.execute(
+        """
+        SELECT id
+        FROM messages
+        WHERE chat_session_id = ? AND role = 'assistant' AND status = 'pending'
+        LIMIT 1
+        """,
+        (chat_session_id,),
+    ).fetchone()
+    return pending is not None
+
+
+@app.route("/api/health", methods=["GET"])
+def health():
+    return jsonify({"ok": True, "modelName": app.config["MODEL_NAME"]})
+
+
+@app.route("/api/auth/me", methods=["GET"])
+def auth_me():
     user = current_user()
     if not user:
-        return redirect(url_for("login"))
-
-    sessions = get_user_sessions(user["id"])
-    if sessions:
-        return redirect(url_for("chat", session_id=sessions[0]["id"]))
-
-    new_session_id = create_chat_session(user["id"])
-    return redirect(url_for("chat", session_id=new_session_id))
+        return jsonify({"user": None})
+    return jsonify({"user": serialize_user(user)})
 
 
-@app.route("/signup", methods=["GET", "POST"])
+@app.route("/api/auth/signup", methods=["POST"])
 def signup():
-    if current_user():
-        return redirect(url_for("index"))
+    payload = request.get_json(silent=True) or {}
+    username = str(payload.get("username", "")).strip()
+    password = str(payload.get("password", ""))
+    confirm_password = str(payload.get("confirmPassword", ""))
 
-    if request.method == "POST":
-        username = request.form.get("username", "").strip()
-        password = request.form.get("password", "")
-        confirm_password = request.form.get("confirm_password", "")
+    if len(username) < 3:
+        return json_error("Username must be at least 3 characters long.", 400)
+    if len(password) < 8:
+        return json_error("Password must be at least 8 characters long.", 400)
+    if password != confirm_password:
+        return json_error("Passwords do not match.", 400)
 
-        if len(username) < 3:
-            flash("Username must be at least 3 characters long.", "error")
-        elif len(password) < 8:
-            flash("Password must be at least 8 characters long.", "error")
-        elif password != confirm_password:
-            flash("Passwords do not match.", "error")
-        else:
-            db = get_db()
-            existing_user = db.execute(
-                "SELECT id FROM users WHERE username = ?",
-                (username,),
-            ).fetchone()
-            if existing_user:
-                flash("That username is already taken.", "error")
-            else:
-                db.execute(
-                    "INSERT INTO users (username, password_hash, created_at) VALUES (?, ?, ?)",
-                    (username, generate_password_hash(password), datetime.utcnow().isoformat()),
-                )
-                db.commit()
-                flash("Account created. Please log in.", "success")
-                return redirect(url_for("login"))
+    db = get_db()
+    existing_user = db.execute("SELECT id FROM users WHERE username = ?", (username,)).fetchone()
+    if existing_user:
+        return json_error("That username is already taken.", 409)
 
-    return render_template("signup.html")
-
-
-@app.route("/login", methods=["GET", "POST"])
-def login():
-    if current_user():
-        return redirect(url_for("index"))
-
-    if request.method == "POST":
-        username = request.form.get("username", "").strip()
-        password = request.form.get("password", "")
-        db = get_db()
-        user = db.execute(
-            "SELECT * FROM users WHERE username = ?",
-            (username,),
-        ).fetchone()
-
-        if not user or not check_password_hash(user["password_hash"], password):
-            flash("Invalid username or password.", "error")
-        else:
-            session.clear()
-            session["user_id"] = user["id"]
-            return redirect(url_for("index"))
-
-    return render_template("login.html")
-
-
-@app.route("/logout", methods=["POST"])
-@login_required
-def logout():
+    now = utc_now()
+    cursor = db.execute(
+        "INSERT INTO users (username, password_hash, created_at) VALUES (?, ?, ?)",
+        (username, generate_password_hash(password), now),
+    )
+    db.commit()
+    user = db.execute(
+        "SELECT id, username, created_at FROM users WHERE id = ?",
+        (cursor.lastrowid,),
+    ).fetchone()
     session.clear()
-    flash("You have been logged out.", "success")
-    return redirect(url_for("login"))
+    session["user_id"] = user["id"]
+    return jsonify({"user": serialize_user(user)})
 
 
-@app.route("/chat/new", methods=["POST"])
-@login_required
-def new_chat():
-    user = current_user()
-    session_id = create_chat_session(user["id"])
-    return redirect(url_for("chat", session_id=session_id))
+@app.route("/api/auth/login", methods=["POST"])
+def login():
+    payload = request.get_json(silent=True) or {}
+    username = str(payload.get("username", "")).strip()
+    password = str(payload.get("password", ""))
 
+    db = get_db()
+    user = db.execute(
+        "SELECT * FROM users WHERE username = ?",
+        (username,),
+    ).fetchone()
 
-@app.route("/chat/<int:session_id>")
-@login_required
-def chat(session_id: int):
-    user = current_user()
-    chat_session = get_session_or_404(session_id, user["id"])
-    if not chat_session:
-        flash("Chat session not found.", "error")
-        return redirect(url_for("index"))
+    if not user or not check_password_hash(user["password_hash"], password):
+        return json_error("Invalid username or password.", 401)
 
-    sessions = get_user_sessions(user["id"])
-    messages = get_session_messages(session_id)
-    return render_template(
-        "chat.html",
-        chat_session=chat_session,
-        sessions=sessions,
-        messages=messages,
+    session.clear()
+    session["user_id"] = user["id"]
+    return jsonify(
+        {
+            "user": {
+                "id": user["id"],
+                "username": user["username"],
+                "createdAt": user["created_at"],
+            }
+        }
     )
 
 
-@app.route("/chat/<int:session_id>/message", methods=["POST"])
-@login_required
+@app.route("/api/auth/logout", methods=["POST"])
+@api_login_required
+def logout():
+    session.clear()
+    return jsonify({"ok": True})
+
+
+@app.route("/api/chats", methods=["GET"])
+@api_login_required
+def list_chats():
+    user = current_user()
+    db = get_db()
+    sessions = get_user_sessions(db, user["id"])
+    return jsonify({"sessions": [serialize_chat_session(item) for item in sessions]})
+
+
+@app.route("/api/chats", methods=["POST"])
+@api_login_required
+def create_chat():
+    user = current_user()
+    db = get_db()
+    chat_session = create_chat_session(db, user["id"])
+    return jsonify({"session": serialize_chat_session(chat_session)}), 201
+
+
+@app.route("/api/chats/<int:session_id>", methods=["GET"])
+@api_login_required
+def get_chat(session_id: int):
+    user = current_user()
+    db = get_db()
+    chat_session = get_session_for_user(db, session_id, user["id"])
+    if not chat_session:
+        return json_error("Chat session not found.", 404)
+
+    enriched_session = db.execute(
+        """
+        SELECT
+            s.*,
+            COALESCE(
+                (
+                    SELECT content
+                    FROM messages m
+                    WHERE m.chat_session_id = s.id
+                    ORDER BY m.id DESC
+                    LIMIT 1
+                ),
+                ''
+            ) AS last_message
+        FROM chat_sessions s
+        WHERE s.id = ?
+        """,
+        (session_id,),
+    ).fetchone()
+    messages = get_session_messages(db, session_id)
+    return jsonify(
+        {
+            "session": serialize_chat_session(enriched_session),
+            "messages": [serialize_message(message) for message in messages],
+        }
+    )
+
+
+@app.route("/api/chats/<int:session_id>/messages", methods=["POST"])
+@api_login_required
 def send_message(session_id: int):
     user = current_user()
-    chat_session = get_session_or_404(session_id, user["id"])
+    db = get_db()
+    chat_session = get_session_for_user(db, session_id, user["id"])
     if not chat_session:
-        flash("Chat session not found.", "error")
-        return redirect(url_for("index"))
+        return json_error("Chat session not found.", 404)
 
-    user_message = request.form.get("message", "").strip()
+    if has_pending_assistant_message(db, session_id):
+        return json_error("Please wait for the current response to finish.", 409)
+
+    payload = request.get_json(silent=True) or {}
+    user_message = str(payload.get("content", "")).strip()
     if not user_message:
-        flash("Please enter a message before sending.", "error")
-        return redirect(url_for("chat", session_id=session_id))
+        return json_error("Please enter a message before sending.", 400)
 
     therapist = OllamaTherapist(chat_session["model_name"])
     emotional_state = therapist.detect_emotional_state(user_message)
 
-    add_message(session_id, "user", user_message, emotional_state)
-    maybe_update_chat_title(session_id, user_message)
+    user_row = create_message(db, session_id, "user", user_message, emotional_state=emotional_state)
+    maybe_update_chat_title(db, session_id, user_message)
+    assistant_row = create_message(db, session_id, "assistant", "", status="pending")
 
-    message_history = get_session_messages(session_id)
-    assistant_response = therapist.generate_response(message_history, emotional_state)
-    add_message(session_id, "assistant", assistant_response)
+    worker = threading.Thread(
+        target=generate_assistant_reply,
+        args=(session_id, assistant_row["id"], emotional_state),
+        daemon=True,
+    )
+    worker.start()
 
-    return redirect(url_for("chat", session_id=session_id))
+    return jsonify(
+        {
+            "userMessage": serialize_message(user_row),
+            "assistantMessage": serialize_message(assistant_row),
+        }
+    ), 202
 
 
 init_db()
@@ -424,4 +630,4 @@ init_db()
 if __name__ == "__main__":
     host = os.getenv("THERAPY_HOST", "0.0.0.0")
     port = int(os.getenv("THERAPY_PORT", "8000"))
-    app.run(host=host, port=port, debug=False)
+    app.run(host=host, port=port, debug=False, threaded=True)
