@@ -1,0 +1,23 @@
+{% extends "base.html" %}
+
+{% block title %}Login | Therepy{% endblock %}
+
+{% block content %}
+<section class="auth-card">
+    <div class="auth-copy">
+        <h1>Private browser therapy chat</h1>
+        <p>Log in to access your saved sessions, continue past conversations, and use Therepy from any browser on your Raspberry Pi network.</p>
+    </div>
+
+    <form class="auth-form" method="post">
+        <label for="username">Username</label>
+        <input id="username" name="username" type="text" autocomplete="username" required>
+
+        <label for="password">Password</label>
+        <input id="password" name="password" type="password" autocomplete="current-password" required>
+
+        <button class="primary-button" type="submit">Login</button>
+        <p class="auth-switch">No account yet? <a href="{{ url_for('signup') }}">Sign up</a></p>
+    </form>
+</section>
+{% endblock %}
