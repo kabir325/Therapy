@@ -4,6 +4,7 @@ import subprocess
 import threading
 from datetime import datetime
 from functools import wraps
+from urllib.parse import urlparse
 
 from flask import Flask, g, jsonify, request, session
 from werkzeug.security import check_password_hash, generate_password_hash
@@ -207,7 +208,7 @@ def handle_preflight():
 @app.after_request
 def add_cors_headers(response):
     origin = request.headers.get("Origin")
-    if origin and origin in ALLOWED_ORIGINS:
+    if origin and is_allowed_origin(origin):
         response.headers["Access-Control-Allow-Origin"] = origin
         response.headers["Access-Control-Allow-Credentials"] = "true"
         response.headers["Access-Control-Allow-Headers"] = "Content-Type"
@@ -227,6 +228,23 @@ def json_error(message: str, status_code: int):
     response = jsonify({"error": message})
     response.status_code = status_code
     return response
+
+
+def is_allowed_origin(origin: str) -> bool:
+    if origin in ALLOWED_ORIGINS:
+        return True
+
+    try:
+        parsed_origin = urlparse(origin)
+    except Exception:
+        return False
+
+    request_host = request.host.split(":")[0]
+    if parsed_origin.scheme not in {"http", "https"}:
+        return False
+
+    # Allow the frontend when it is served from the same Pi host/IP but on a different port.
+    return parsed_origin.hostname == request_host
 
 
 def current_user():

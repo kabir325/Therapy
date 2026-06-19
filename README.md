@@ -83,6 +83,8 @@ Set:
 NEXT_PUBLIC_API_BASE_URL=http://YOUR_PI_IP:8005
 ```
 
+If you leave it as `http://localhost:8005`, the frontend now auto-switches to the current Pi hostname/IP when opened from another device.
+
 Then install and run:
 
 ```bash
@@ -105,6 +107,8 @@ Example:
 ```bash
 export THERAPY_ALLOWED_ORIGINS=http://YOUR_PI_IP:3005
 ```
+
+The backend also accepts requests from the same Pi host/IP on other frontend ports by default, which helps when opening the site from another device on your network.
 
 If you also want local desktop development, you can use multiple origins:
 
