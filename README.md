@@ -65,7 +65,7 @@ python start_therapy.py
 Backend default URL:
 
 ```text
-http://YOUR_PI_IP:8000
+http://YOUR_PI_IP:8005
 ```
 
 ## Frontend setup
@@ -80,7 +80,7 @@ cp .env.local.example .env.local
 Set:
 
 ```text
-NEXT_PUBLIC_API_BASE_URL=http://YOUR_PI_IP:8000
+NEXT_PUBLIC_API_BASE_URL=http://YOUR_PI_IP:8005
 ```
 
 Then install and run:
@@ -93,31 +93,31 @@ npm run dev
 Frontend default URL:
 
 ```text
-http://YOUR_PI_IP:3000
+http://YOUR_PI_IP:3005
 ```
 
 ## Raspberry Pi network setup
 
-If your frontend runs on port `3000`, the backend must allow that browser origin.
+If your frontend runs on port `3005`, the backend must allow that browser origin.
 
 Example:
 
 ```bash
-export THERAPY_ALLOWED_ORIGINS=http://YOUR_PI_IP:3000
+export THERAPY_ALLOWED_ORIGINS=http://YOUR_PI_IP:3005
 ```
 
 If you also want local desktop development, you can use multiple origins:
 
 ```bash
-export THERAPY_ALLOWED_ORIGINS=http://YOUR_PI_IP:3000,http://localhost:3000,http://127.0.0.1:3000
+export THERAPY_ALLOWED_ORIGINS=http://YOUR_PI_IP:3005,http://localhost:3005,http://127.0.0.1:3005
 ```
 
 ## Production-style deployment on the Pi
 
 A clean setup is:
 
-1. Run the Flask backend on port `8000`
-2. Run the Next.js frontend on port `3000`
+1. Run the Flask backend on port `8005`
+2. Run the Next.js frontend on port `3005`
 3. Put Nginx in front if you want one clean domain or IP entry point
 4. Use `systemd` to auto-start both services on boot
 

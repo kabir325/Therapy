@@ -4,10 +4,7 @@ __pycache__/
 
 .venv/
 venv/
-env/
 ENV/
-
-
 
 therepy.db
 therapy_sessions/

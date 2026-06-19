@@ -17,7 +17,7 @@ ALLOWED_ORIGINS = {
     origin.strip()
     for origin in os.getenv(
         "THERAPY_ALLOWED_ORIGINS",
-        "http://localhost:3000,http://127.0.0.1:3000",
+        "http://localhost:3005,http://127.0.0.1:3005",
     ).split(",")
     if origin.strip()
 }
@@ -629,5 +629,5 @@ init_db()
 
 if __name__ == "__main__":
     host = os.getenv("THERAPY_HOST", "0.0.0.0")
-    port = int(os.getenv("THERAPY_PORT", "8000"))
+    port = int(os.getenv("THERAPY_PORT", "8005"))
     app.run(host=host, port=port, debug=False, threaded=True)

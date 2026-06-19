@@ -36,7 +36,7 @@ def ensure_model_installed(model_name: str) -> bool:
 
 def main():
     host = os.getenv("THERAPY_HOST", "0.0.0.0")
-    port = int(os.getenv("THERAPY_PORT", "8000"))
+    port = int(os.getenv("THERAPY_PORT", "8005"))
 
     print("Therepy Backend Launcher")
     print("=" * 40)
