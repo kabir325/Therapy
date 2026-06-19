@@ -7,8 +7,7 @@ venv/
 env/
 ENV/
 
-.env
-.env.*
+
 
 therepy.db
 therapy_sessions/

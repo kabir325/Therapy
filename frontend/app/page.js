@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect } from "react";
+import { useEffect, useRef } from "react";
 import { useRouter } from "next/navigation";
 
 import LoadingScreen from "../components/loading-screen";
@@ -8,8 +8,14 @@ import { apiFetch } from "../lib/api";
 
 export default function HomePage() {
   const router = useRouter();
+  const hasBootstrappedRef = useRef(false);
 
   useEffect(() => {
+    if (hasBootstrappedRef.current) {
+      return;
+    }
+    hasBootstrappedRef.current = true;
+
     async function bootstrap() {
       try {
         const authPayload = await apiFetch("/api/auth/me");

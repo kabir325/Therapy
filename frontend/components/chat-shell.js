@@ -37,8 +37,15 @@ export default function ChatShell({ sessionId }) {
     () => messages.some((message) => message.role === "assistant" && message.status === "pending"),
     [messages]
   );
+  const hasValidSessionId = Boolean(sessionId) && sessionId !== "undefined";
 
   async function loadChat({ withLoading = false } = {}) {
+    if (!hasValidSessionId) {
+      setError("This chat session could not be loaded.");
+      setIsLoading(false);
+      return;
+    }
+
     try {
       if (withLoading) {
         setIsLoading(true);
@@ -111,7 +118,7 @@ export default function ChatShell({ sessionId }) {
   async function handleSend(event) {
     event.preventDefault();
     const content = draft.trim();
-    if (!content || isSending || hasPendingAssistant) {
+    if (!content || isSending || hasPendingAssistant || !hasValidSessionId) {
       return;
     }
 

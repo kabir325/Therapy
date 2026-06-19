@@ -1,5 +1,6 @@
 import ChatShell from "../../../components/chat-shell";
 
-export default function ChatPage({ params }) {
-  return <ChatShell sessionId={params.sessionId} />;
+export default async function ChatPage({ params }) {
+  const { sessionId } = await params;
+  return <ChatShell sessionId={sessionId} />;
 }
